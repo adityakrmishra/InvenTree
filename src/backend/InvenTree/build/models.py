@@ -2974,9 +2974,10 @@ class RepairOrder(
                 if outstanding <= 0:
                     continue
 
+                # Serialized stock cannot be allocated to a repair order
                 available_stock = stock.models.StockItem.objects.filter(
                     stock.models.StockItem.IN_STOCK_FILTER, part=line.part
-                )
+                ).filter(Q(serial=None) | Q(serial=''))
 
                 if location:
                     sublocations = location.get_descendants(include_self=True)
@@ -3179,6 +3180,18 @@ class RepairOrderAllocation(models.Model):
                 )
         except part.models.Part.DoesNotExist:
             errors['line'] = _('Cannot allocate stock to a line without a part')
+
+        if 'item' not in errors:
+            if self.item.serialized:
+                # Serialized stock cannot be consumed by quantity (see StockItem.take_stock),
+                # so it would prevent the repair order from being completed
+                errors['item'] = _(
+                    'Serialized stock cannot be allocated to a repair order'
+                )
+            elif not self.item.in_stock:
+                # Also checked when the stock is consumed, in case the stock item
+                # has become unavailable (e.g. quarantined) since it was allocated
+                errors['item'] = _('Stock item is not in stock')
 
         if 'quantity' not in errors and 'item' not in errors:
             # Determine how much of this stock item is *actually* still available,

@@ -1157,6 +1157,125 @@ class RepairOrderAPITests(InvenTreeAPITestCase):
         with self.assertRaises(ValidationError):
             allocation.delete()
 
+    def test_allocation_requires_available_stock(self):
+        """Only available, non-serialized stock can be allocated to a repair order.
+
+        - Unavailable stock (e.g. quarantined, delivered to a customer, or installed
+          in another item) must not be reserved for (and later consumed by) a repair
+        - Serialized stock cannot be consumed by quantity, so allocating it would
+          prevent the repair order from ever being completed
+        """
+        from build.models import RepairOrderAllocation, RepairOrderLineItem
+        from company.models import Company
+        from stock.models import StockItem, StockLocation
+        from stock.status_codes import StockStatus
+
+        loc = StockLocation.objects.first()
+        p = Part.objects.filter(component=True).first()
+        line = RepairOrderLineItem.objects.create(order=self.ro, part=p, quantity=5)
+
+        url = reverse('api-repair-order-allocation-list')
+
+        assembly = StockItem.objects.create(part=p, quantity=1, location=loc)
+        customer = Company.objects.create(name='Another customer', is_customer=True)
+
+        unavailable = [
+            StockItem.objects.create(
+                part=p, quantity=10, location=loc, status=StockStatus.QUARANTINED.value
+            ),
+            StockItem.objects.create(part=p, quantity=10, customer=customer),
+            StockItem.objects.create(part=p, quantity=10, belongs_to=assembly),
+        ]
+
+        for item in unavailable:
+            response = self.post(
+                url,
+                {'line': line.pk, 'item': item.pk, 'quantity': 1},
+                expected_code=400,
+            )
+            self.assertIn('item', response.data)
+
+        # Available stock can be allocated
+        available = StockItem.objects.create(part=p, quantity=10, location=loc)
+        self.post(
+            url,
+            {'line': line.pk, 'item': available.pk, 'quantity': 5},
+            expected_code=201,
+        )
+
+        # Serialized stock is rejected
+        board = Part.objects.create(
+            name='Controller board', component=True, trackable=True
+        )
+        board_line = RepairOrderLineItem.objects.create(
+            order=self.ro, part=board, quantity=1
+        )
+        serialized = StockItem.objects.create(
+            part=board, quantity=1, serial='1001', location=loc
+        )
+
+        response = self.post(
+            url,
+            {'line': board_line.pk, 'item': serialized.pk, 'quantity': 1},
+            expected_code=400,
+        )
+        self.assertIn('item', response.data)
+
+        # Auto-allocation skips serialized stock, rather than allocating it
+        self.post(
+            reverse('api-repair-order-auto-allocate', kwargs={'pk': self.ro.pk}),
+            expected_code=201,
+        )
+        self.assertFalse(RepairOrderAllocation.objects.filter(item=serialized).exists())
+
+    def test_complete_rejects_unavailable_allocation(self):
+        """Completing an order must not consume stock which has become unavailable.
+
+        The completion is rolled back as a whole: no stock is consumed (from any
+        allocation), the allocations are retained, and the order remains open.
+        """
+        from build.models import RepairOrderAllocation, RepairOrderLineItem
+        from stock.models import StockItem, StockLocation
+        from stock.status_codes import StockStatus
+
+        loc = StockLocation.objects.first()
+        p = Part.objects.filter(component=True).first()
+
+        # Allocations are consumed in stock item order - 'good' is processed first
+        good = StockItem.objects.create(part=p, quantity=10, location=loc)
+        bad = StockItem.objects.create(part=p, quantity=10, location=loc)
+
+        line = RepairOrderLineItem.objects.create(order=self.ro, part=p, quantity=4)
+        RepairOrderAllocation.objects.create(line=line, item=good, quantity=2)
+        RepairOrderAllocation.objects.create(line=line, item=bad, quantity=2)
+
+        self.post(
+            reverse('api-repair-order-issue', kwargs={'pk': self.ro.pk}),
+            expected_code=201,
+        )
+
+        # The stock is quarantined after it has been allocated
+        bad.status = StockStatus.QUARANTINED.value
+        bad.save()
+
+        self.post(
+            reverse('api-repair-order-complete', kwargs={'pk': self.ro.pk}),
+            expected_code=400,
+        )
+
+        self.ro.refresh_from_db()
+        self.assertEqual(self.ro.status, RepairOrderStatus.IN_PROGRESS.value)
+        self.assertIsNone(self.ro.completion_date)
+
+        good.refresh_from_db()
+        bad.refresh_from_db()
+        line.refresh_from_db()
+
+        self.assertEqual(good.quantity, 10)
+        self.assertEqual(bad.quantity, 10)
+        self.assertEqual(line.consumed, 0)
+        self.assertEqual(RepairOrderAllocation.objects.filter(line=line).count(), 2)
+
     def test_auto_allocate_stock(self):
         """POST auto-allocate/ should allocate available stock against outstanding lines."""
         from build.models import RepairOrderAllocation, RepairOrderLineItem

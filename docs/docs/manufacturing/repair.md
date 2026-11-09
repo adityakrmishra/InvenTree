@@ -121,9 +121,16 @@ Each Repair Order can contain one or more *Line Items*, which specify the parts 
 !!! info "Multiple Allocations"
     Multiple stock items can be allocated against a single line item, if a single stock item does not have sufficient quantity for the repair.
 
+Only stock which is *available* can be allocated to a repair order. Stock items which are not in stock (for example, quarantined or damaged stock, stock which is installed in another item, or stock which has been sent to a customer) cannot be allocated.
+
+!!! warning "Serialized Stock"
+    Serialized stock items cannot currently be allocated to a repair order, and are skipped by automatic allocation.
+
 ### Stock Consumption on Completion
 
 When a Repair Order is **completed**, all allocated stock is physically consumed (removed from inventory). The allocated quantity is subtracted from each stock item and the allocation records are deleted.
+
+If any allocated stock item is no longer available when the order is completed (e.g. it has since been quarantined), the order cannot be completed and no stock is consumed. Remove or replace the affected allocation, and then complete the order.
 
 ### Stock Release on Cancellation
 

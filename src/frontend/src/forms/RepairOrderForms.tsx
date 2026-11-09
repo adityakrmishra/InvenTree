@@ -127,6 +127,7 @@ export function useAllocateStockToRepairOrderForm({
         filters: {
           part: lineItem?.part,
           available: true,
+          serialized: false,
           part_detail: true,
           location_detail: true
         }
