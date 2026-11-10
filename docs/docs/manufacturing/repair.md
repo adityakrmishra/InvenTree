@@ -123,12 +123,12 @@ Each Repair Order can contain one or more *Line Items*, which specify the parts 
 
 Only stock which is *available* can be allocated to a repair order. Stock items which are not in stock (for example, quarantined or damaged stock, stock which is installed in another item, or stock which has been sent to a customer) cannot be allocated.
 
-!!! warning "Serialized Stock"
-    Serialized stock items cannot currently be allocated to a repair order, and are skipped by automatic allocation.
+!!! info "Serialized Stock"
+    A serialized stock item can be allocated to a repair order (with a quantity of 1). When the order is completed, the item is marked as *consumed* by the repair order, in the same way that a [Build Order](./build.md) consumes stock. The stock item is retained (along with its history), but it is no longer in stock. A consumed stock item can be returned to stock if required.
 
 ### Stock Consumption on Completion
 
-When a Repair Order is **completed**, all allocated stock is physically consumed (removed from inventory). The allocated quantity is subtracted from each stock item and the allocation records are deleted.
+When a Repair Order is **completed**, all allocated stock is physically consumed (removed from inventory). The allocated quantity is subtracted from each stock item and the allocation records are deleted. Serialized stock items are instead marked as consumed by the repair order, as described above.
 
 If any allocated stock item is no longer available when the order is completed (e.g. it has since been quarantined), the order cannot be completed and no stock is consumed. Remove or replace the affected allocation, and then complete the order.
 

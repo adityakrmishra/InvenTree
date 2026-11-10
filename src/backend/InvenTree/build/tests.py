@@ -1158,14 +1158,12 @@ class RepairOrderAPITests(InvenTreeAPITestCase):
             allocation.delete()
 
     def test_allocation_requires_available_stock(self):
-        """Only available, non-serialized stock can be allocated to a repair order.
+        """Only available stock can be allocated to a repair order.
 
-        - Unavailable stock (e.g. quarantined, delivered to a customer, or installed
-          in another item) must not be reserved for (and later consumed by) a repair
-        - Serialized stock cannot be consumed by quantity, so allocating it would
-          prevent the repair order from ever being completed
+        Unavailable stock (e.g. quarantined, delivered to a customer, or installed
+        in another item) must not be reserved for (and later consumed by) a repair.
         """
-        from build.models import RepairOrderAllocation, RepairOrderLineItem
+        from build.models import RepairOrderLineItem
         from company.models import Company
         from stock.models import StockItem, StockLocation
         from stock.status_codes import StockStatus
@@ -1203,30 +1201,94 @@ class RepairOrderAPITests(InvenTreeAPITestCase):
             expected_code=201,
         )
 
-        # Serialized stock is rejected
+    def test_complete_consumes_serialized_stock(self):
+        """Serialized stock is consumed into the repair order, as for a build order.
+
+        The serialized item cannot be reduced in quantity, so it is retained
+        (removed from stock) and marked as consumed by the repair order.
+        """
+        from build.models import RepairOrderAllocation, RepairOrderLineItem
+        from stock.models import StockItem, StockLocation
+
+        loc = StockLocation.objects.first()
+
         board = Part.objects.create(
             name='Controller board', component=True, trackable=True
         )
-        board_line = RepairOrderLineItem.objects.create(
-            order=self.ro, part=board, quantity=1
-        )
-        serialized = StockItem.objects.create(
-            part=board, quantity=1, serial='1001', location=loc
-        )
+        line = RepairOrderLineItem.objects.create(order=self.ro, part=board, quantity=2)
 
+        boards = [
+            StockItem.objects.create(part=board, quantity=1, serial=sn, location=loc)
+            for sn in ['1001', '1002']
+        ]
+
+        url = reverse('api-repair-order-allocation-list')
+
+        # A serialized item can only be allocated as a whole
         response = self.post(
             url,
-            {'line': board_line.pk, 'item': serialized.pk, 'quantity': 1},
+            {'line': line.pk, 'item': boards[0].pk, 'quantity': 0.5},
             expected_code=400,
         )
-        self.assertIn('item', response.data)
+        self.assertIn('quantity', response.data)
 
-        # Auto-allocation skips serialized stock, rather than allocating it
+        self.post(
+            url,
+            {'line': line.pk, 'item': boards[0].pk, 'quantity': 1},
+            expected_code=201,
+        )
+
+        # Auto-allocation allocates the remaining serialized item
         self.post(
             reverse('api-repair-order-auto-allocate', kwargs={'pk': self.ro.pk}),
             expected_code=201,
         )
-        self.assertFalse(RepairOrderAllocation.objects.filter(item=serialized).exists())
+        self.assertEqual(RepairOrderAllocation.objects.get(item=boards[1]).quantity, 1)
+
+        self.post(
+            reverse('api-repair-order-issue', kwargs={'pk': self.ro.pk}),
+            expected_code=201,
+        )
+        self.post(
+            reverse('api-repair-order-complete', kwargs={'pk': self.ro.pk}),
+            expected_code=201,
+        )
+
+        self.ro.refresh_from_db()
+        self.assertEqual(self.ro.status, RepairOrderStatus.COMPLETE.value)
+
+        line.refresh_from_db()
+        self.assertEqual(line.consumed, 2)
+        self.assertFalse(RepairOrderAllocation.objects.filter(line=line).exists())
+
+        for item in boards:
+            item.refresh_from_db()
+            self.assertEqual(item.consumed_by_repair, self.ro)
+            self.assertEqual(item.quantity, 1)
+            self.assertIsNone(item.location)
+            self.assertFalse(item.in_stock)
+
+        self.assertFalse(
+            StockItem.objects.filter(
+                StockItem.IN_STOCK_FILTER, pk__in=[b.pk for b in boards]
+            ).exists()
+        )
+
+        # The consumed items are listed against the repair order
+        self.assignRole('stock.view')
+
+        response = self.get(
+            reverse('api-stock-list'), {'consumed_by_repair': self.ro.pk}
+        )
+        self.assertEqual(
+            sorted(item['pk'] for item in response.data), sorted(b.pk for b in boards)
+        )
+
+        # A consumed item can be returned to stock
+        boards[0].return_to_stock(loc, user=self.user)
+        boards[0].refresh_from_db()
+        self.assertIsNone(boards[0].consumed_by_repair)
+        self.assertTrue(boards[0].in_stock)
 
     def test_complete_rejects_unavailable_allocation(self):
         """Completing an order must not consume stock which has become unavailable.
